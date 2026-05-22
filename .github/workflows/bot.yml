@@ -1,0 +1,92 @@
+name: 'CTF Time'
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs every day at 12:00 AM IST
+    # GitHub Actions cron uses UTC
+    # 12:00 AM IST = 6:30 PM UTC
+    - cron: "30 18 * * *"
+
+jobs:
+  ctf-time-to-discord:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install jq nodejs npm bc -y
+
+      - name: Get upcoming CTFs from CTFTime API
+        shell: bash
+        run: |
+          START=$(date -u +%s)
+          END=$(date -u +%s -d "+7 days")
+
+          curl -s "https://ctftime.org/api/v1/events/?limit=10&start=$START&end=$END" \
+            | jq > out.txt
+
+      - name: Send message to Discord webhook
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+        run: |
+          LENGTH=$(jq length out.txt)
+          LENGTH=$((LENGTH - 1))
+
+          FIELDS=""
+
+          for i in $(seq 0 $LENGTH); do
+
+              TITLE=$(jq -r ".[$i].title" out.txt)
+              START_TIME_RAW=$(jq -r ".[$i].start" out.txt)
+              URL=$(jq -r ".[$i].ctftime_url" out.txt)
+              WEIGHT=$(jq -r ".[$i].weight" out.txt)
+              FORMAT=$(jq -r ".[$i].format" out.txt)
+
+              # Convert to Discord timestamp
+              UNIX_TIME=$(date -d "$START_TIME_RAW" +%s)
+
+              # Full date + relative time
+              START_TIME="<t:${UNIX_TIME}:F> (<t:${UNIX_TIME}:R>)"
+
+              # Skip unrated / invalid CTFs
+              if (( $(echo "$WEIGHT > 0" | bc -l) )); then
+
+                  VALUE=$(printf "**Weight:** %s\n**Start:** %s\n**Format:** %s\n[CTFTime Link](%s)" \
+                    "$WEIGHT" \
+                    "$START_TIME" \
+                    "$FORMAT" \
+                    "$URL")
+
+                  FIELD=$(jq -n \
+                    --arg name "$TITLE" \
+                    --arg value "$VALUE" \
+                    '{name: $name, value: $value, inline: false}')
+
+                  if [ -z "$FIELDS" ]; then
+                      FIELDS="$FIELD"
+                  else
+                      FIELDS="$FIELDS,$FIELD"
+                  fi
+              fi
+          done
+
+          PAYLOAD=$(jq -n \
+            --arg title "📅 Upcoming CTFs (Next 7 Days)" \
+            --argjson fields "[$FIELDS]" \
+            '{
+              embeds: [
+                {
+                  title: $title,
+                  color: 3447003,
+                  fields: $fields
+                }
+              ]
+            }')
+
+          curl -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
