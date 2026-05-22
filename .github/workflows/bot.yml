@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Every day at 12:00 AM IST
-    # GitHub Actions cron is UTC
+    # GitHub cron uses UTC
     - cron: "30 18 * * *"
 
 jobs:
@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install jq bc curl -y
+          sudo apt install jq curl -y
 
       - name: Fetch upcoming CTF events
         shell: bash
@@ -29,12 +29,12 @@ jobs:
 
           curl -L -s \
             -H "User-Agent: Mozilla/5.0" \
-            "https://ctftime.org/api/v1/events/?limit=10&start=$START&end=$END" \
+            "https://ctftime.org/api/v1/events/?limit=15&start=$START&end=$END" \
             -o out.txt
 
           jq empty out.txt
 
-      - name: Send events to Discord
+      - name: Send embeds to Discord
         shell: bash
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -42,59 +42,99 @@ jobs:
         run: |
           set -e
 
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Missing DISCORD_WEBHOOK_URL secret"
+            exit 1
+          fi
+
           LENGTH=$(jq length out.txt)
           LENGTH=$((LENGTH - 1))
 
-          FIELDS=""
+          EMBEDS=""
 
-          echo "[*] Building Discord embed..."
+          echo "[*] Building embeds..."
 
           for i in $(seq 0 $LENGTH); do
 
               TITLE=$(jq -r ".[$i].title" out.txt)
-              START_TIME_RAW=$(jq -r ".[$i].start" out.txt)
-              URL=$(jq -r ".[$i].ctftime_url" out.txt)
+
+              START_RAW=$(jq -r ".[$i].start" out.txt)
+              END_RAW=$(jq -r ".[$i].finish" out.txt)
+
+              URL=$(jq -r ".[$i].url" out.txt)
               WEIGHT=$(jq -r ".[$i].weight" out.txt)
               FORMAT=$(jq -r ".[$i].format" out.txt)
+              LOGO=$(jq -r ".[$i].logo" out.txt)
+              ONSITE=$(jq -r ".[$i].onsite" out.txt)
 
-              # Discord local timestamps
-              UNIX_TIME=$(date -d "$START_TIME_RAW" +%s)
+              DURATION_DAYS=$(jq -r ".[$i].duration.days" out.txt)
+              DURATION_HOURS=$(jq -r ".[$i].duration.hours" out.txt)
 
-              START_TIME="<t:${UNIX_TIME}:F> (<t:${UNIX_TIME}:R>)"
+              START_UNIX=$(date -d "$START_RAW" +%s)
+              END_UNIX=$(date -d "$END_RAW" +%s)
 
-              # Skip unrated CTFs
-              if (( $(echo "$WEIGHT > 0" | bc -l) )); then
-
-                  VALUE=$(printf "**Weight:** %s\n**Start:** %s\n**Format:** %s\n[CTFTime Link](%s)" \
-                    "$WEIGHT" \
-                    "$START_TIME" \
-                    "$FORMAT" \
-                    "$URL")
-
-                  FIELD=$(jq -n \
-                    --arg name "$TITLE" \
-                    --arg value "$VALUE" \
-                    '{name: $name, value: $value, inline: false}')
-
-                  if [ -z "$FIELDS" ]; then
-                      FIELDS="$FIELD"
-                  else
-                      FIELDS="$FIELDS,$FIELD"
-                  fi
+              if [ "$ONSITE" = "true" ]; then
+                FORMAT="$FORMAT"
+              else
+                FORMAT="Online $FORMAT"
               fi
+
+              DURATION="${DURATION_DAYS} days, ${DURATION_HOURS} hours"
+
+              EMBED=$(jq -n \
+                --arg title "$TITLE" \
+                --arg url "$URL" \
+                --arg weight "$WEIGHT" \
+                --arg format "$FORMAT" \
+                --arg duration "$DURATION" \
+                --arg start "<t:${START_UNIX}:F>" \
+                --arg end "<t:${END_UNIX}:F>" \
+                --arg logo "$LOGO" \
+                '{
+                  title: $title,
+                  url: $url,
+                  color: 3447003,
+
+                  fields: [
+                    {
+                      name: "Duration",
+                      value: $duration,
+                      inline: true
+                    },
+                    {
+                      name: "Format",
+                      value: $format,
+                      inline: true
+                    },
+                    {
+                      name: "Weight",
+                      value: $weight,
+                      inline: true
+                    },
+                    {
+                      name: "Timeframe",
+                      value: ($start + " → " + $end),
+                      inline: false
+                    }
+                  ],
+
+                  thumbnail:
+                    (if $logo != "" then {url: $logo} else null end)
+                }')
+
+              if [ -z "$EMBEDS" ]; then
+                  EMBEDS="$EMBED"
+              else
+                  EMBEDS="$EMBEDS,$EMBED"
+              fi
+
           done
 
           PAYLOAD=$(jq -n \
-            --arg title "📅 Upcoming Rated CTFs (Next 7 Days)" \
-            --argjson fields "[$FIELDS]" \
+            --argjson embeds "[$EMBEDS]" \
             '{
-              embeds: [
-                {
-                  title: $title,
-                  color: 3447003,
-                  fields: $fields
-                }
-              ]
+              content: "@everyone Upcoming CTF Events!",
+              embeds: $embeds
             }')
 
           echo "[*] Sending webhook..."
@@ -103,4 +143,4 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
 
-          echo "[+] Done!"
+          echo "[+] Sent successfully"
